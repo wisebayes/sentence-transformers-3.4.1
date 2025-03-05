@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from torch import Tensor
 from tqdm import trange
+import time
 
 from sentence_transformers.evaluation.SentenceEvaluator import SentenceEvaluator
 from sentence_transformers.similarity_functions import SimilarityFunction
@@ -280,6 +281,19 @@ class InformationRetrievalEvaluator(SentenceEvaluator):
         self.store_metrics_in_model_card_data(model, metrics, epoch, steps)
         return metrics
 
+    def precompute_corpus_embeddings(self, corpus, model, batch_size, chunk_size):
+        all_corpus_embeddings = []
+        print("Length of corpus:", len(corpus))
+        print("Batch size:", batch_size)
+        for start_idx in range(0, len(corpus), chunk_size):
+            end_idx = min(start_idx + chunk_size, len(corpus))
+            print("Chunk to document:", end_idx)
+            chunk = corpus[start_idx:end_idx]
+            embeddings = model.encode(chunk, batch_size=batch_size, convert_to_tensor=True)
+            embeddings = embeddings.to('cpu')
+            all_corpus_embeddings.append(embeddings)
+        return all_corpus_embeddings
+    
     def compute_metrices(
         self, model: SentenceTransformer, corpus_model=None, corpus_embeddings: Tensor | None = None
     ) -> dict[str, float]:
@@ -296,70 +310,93 @@ class InformationRetrievalEvaluator(SentenceEvaluator):
 
         # Compute embedding for the queries
         with nullcontext() if self.truncate_dim is None else model.truncate_sentence_embeddings(self.truncate_dim):
-            query_embeddings = model.encode(
+            query_embeddings, attention_masks = model.encode(
                 self.queries,
                 prompt_name=self.query_prompt_name,
                 prompt=self.query_prompt,
                 batch_size=self.batch_size,
                 show_progress_bar=self.show_progress_bar,
+                output_value="token_embeddings",
                 convert_to_tensor=True,
             )
 
         queries_result_list = {}
+        actual_total_queries = sum(len(batch) for batch in query_embeddings)
         for name in self.score_functions:
-            queries_result_list[name] = [[] for _ in range(len(query_embeddings))]
+            #queries_result_list[name] = [[] for _ in range(len(query_embeddings))]
+            queries_result_list[name] = [[] for _ in range(len(actual_total_queries))]
 
-        # Iterate over chunks of the corpus
-        for corpus_start_idx in trange(
-            0, len(self.corpus), self.corpus_chunk_size, desc="Corpus Chunks", disable=not self.show_progress_bar
-        ):
-            corpus_end_idx = min(corpus_start_idx + self.corpus_chunk_size, len(self.corpus))
+        # Precompute all corpus embeddings
+        all_corpus_embeddings = self.precompute_corpus_embeddings(
+            corpus=self.corpus,
+            model=corpus_model,  # Use the corpus-specific model
+            batch_size=self.batch_size,
+            chunk_size=self.corpus_chunk_size
+        )
 
-            # Encode chunk of corpus
-            if corpus_embeddings is None:
-                with (
-                    nullcontext()
-                    if self.truncate_dim is None
-                    else corpus_model.truncate_sentence_embeddings(self.truncate_dim)
-                ):
-                    sub_corpus_embeddings = corpus_model.encode(
-                        self.corpus[corpus_start_idx:corpus_end_idx],
-                        prompt_name=self.corpus_prompt_name,
-                        prompt=self.corpus_prompt,
-                        batch_size=self.batch_size,
-                        show_progress_bar=self.show_progress_bar,
-                        convert_to_tensor=True,
+        # Iterate over chunks of the corpus along with each query batch 
+        for query_batch_index, query_batch in enumerate(query_embeddings):
+            for chunk_idx, sub_corpus_embeddings in enumerate(all_corpus_embeddings):
+                sub_corpus_embeddings = sub_corpus_embeddings.to('cuda')
+                chunk_start_idx = chunk_idx * self.corpus_chunk_size  # Calculate the starting index of this chunk
+            #for corpus_start_idx in trange(
+            #    0, len(self.corpus), self.corpus_chunk_size, desc="Corpus Chunks", disable=not self.show_progress_bar
+            #):
+            #    corpus_end_idx = min(corpus_start_idx + self.corpus_chunk_size, len(self.corpus))
+    
+                # Encode chunk of corpus
+                #if corpus_embeddings is None:
+                #    with (
+                #        nullcontext()
+                #        if self.truncate_dim is None
+                #        else corpus_model.truncate_sentence_embeddings(self.truncate_dim)
+                #    ):
+                #        sub_corpus_embeddings = corpus_model.encode(
+                #            self.corpus[corpus_start_idx:corpus_end_idx],
+                #            prompt_name=self.corpus_prompt_name,
+                #            prompt=self.corpus_prompt,
+                #            batch_size=self.batch_size,
+                #            show_progress_bar=self.show_progress_bar,
+                #            convert_to_tensor=True,
+                #        )
+                #else:
+                #    sub_corpus_embeddings = corpus_embeddings[corpus_start_idx:corpus_end_idx]
+    
+                # Compute cosine similarites
+                for name, score_function in self.score_functions.items():
+                    #pair_scores = score_function(query_embeddings, sub_corpus_embeddings)
+                    pair_scores = score_function(query_batch, sub_corpus_embeddings, attention_masks[query_batch_index])
+                    
+                    # Get top-k values
+                    pair_scores_top_k_values, pair_scores_top_k_idx = torch.topk(
+                        pair_scores, min(max_k, len(pair_scores[0])), dim=1, largest=True, sorted=False
                     )
-            else:
-                sub_corpus_embeddings = corpus_embeddings[corpus_start_idx:corpus_end_idx]
-
-            # Compute cosine similarites
-            for name, score_function in self.score_functions.items():
-                pair_scores = score_function(query_embeddings, sub_corpus_embeddings)
-
-                # Get top-k values
-                pair_scores_top_k_values, pair_scores_top_k_idx = torch.topk(
-                    pair_scores, min(max_k, len(pair_scores[0])), dim=1, largest=True, sorted=False
-                )
-                pair_scores_top_k_values = pair_scores_top_k_values.cpu().tolist()
-                pair_scores_top_k_idx = pair_scores_top_k_idx.cpu().tolist()
-
-                for query_itr in range(len(query_embeddings)):
-                    for sub_corpus_id, score in zip(
-                        pair_scores_top_k_idx[query_itr], pair_scores_top_k_values[query_itr]
-                    ):
-                        corpus_id = self.corpus_ids[corpus_start_idx + sub_corpus_id]
-                        # NOTE: TREC/BEIR/MTEB skips cases where the corpus_id is the same as the query_id, e.g.:
-                        # if corpus_id == self.queries_ids[query_itr]:
-                        #     continue
-                        # This is not done here, as this might be unexpected behaviour if the user just uses
-                        # sets of integers from 0 as query_ids and corpus_ids.
-                        if len(queries_result_list[name][query_itr]) < max_k:
-                            # heaqp tracks the quantity of the first element in the tuple
-                            heapq.heappush(queries_result_list[name][query_itr], (score, corpus_id))
-                        else:
-                            heapq.heappushpop(queries_result_list[name][query_itr], (score, corpus_id))
-
+                    pair_scores_top_k_values = pair_scores_top_k_values.cpu().tolist()
+                    pair_scores_top_k_idx = pair_scores_top_k_idx.cpu().tolist()
+    
+                    for query_itr in range(len(query_batch)):
+                        global_query_index = query_itr + (query_batch_index * self.batch_size)
+                        for sub_corpus_id, score in zip(
+                            pair_scores_top_k_idx[query_itr], pair_scores_top_k_values[query_itr]
+                        ):
+                            #corpus_id = self.corpus_ids[corpus_start_idx + sub_corpus_id]
+                            corpus_id = self.corpus_ids[chunk_start_idx + sub_corpus_id]  # Use chunk_start_idx here
+                            # NOTE: TREC/BEIR/MTEB skips cases where the corpus_id is the same as the query_id, e.g.:
+                            # if corpus_id == self.queries_ids[query_itr]:
+                            #     continue
+                            # This is not done here, as this might be unexpected behaviour if the user just uses
+                            # sets of integers from 0 as query_ids and corpus_ids.
+                            if len(queries_result_list[name][global_query_index]) < max_k:
+                                # heaqp tracks the quantity of the first element in the tuple
+                                heapq.heappush(queries_result_list[name][global_query_index], (score, corpus_id))
+                            else:
+                                heapq.heappushpop(queries_result_list[name][global_query_index], (score, corpus_id))
+                sub_corpus_embeddings = sub_corpus_embeddings.to('cpu')
+                
+            # After processing the batch, delete the query_batch tensor to free GPU memory
+            del query_batch
+            torch.cuda.empty_cache()  # Optionally free up any cached GPU memory
+        
         for name in queries_result_list:
             for query_itr in range(len(queries_result_list[name])):
                 for doc_itr in range(len(queries_result_list[name][query_itr])):
