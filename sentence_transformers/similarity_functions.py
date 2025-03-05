@@ -7,6 +7,8 @@ from numpy import ndarray
 from torch import Tensor
 
 from .util import (
+    ed_calc,
+    energy_distance,
     cos_sim,
     dot_score,
     euclidean_sim,
@@ -28,6 +30,7 @@ class SimilarityFunction(Enum):
     - ``SimilarityFunction.MANHATTAN`` (``"manhattan"``): Manhattan distance
     """
 
+    ENERGY_DISTANCE = "energy_distance"
     COSINE = "cosine"
     DOT_PRODUCT = "dot"
     DOT = "dot"  # Alias for DOT_PRODUCT
@@ -59,6 +62,8 @@ class SimilarityFunction(Enum):
         """
         similarity_function = SimilarityFunction(similarity_function)
 
+        if similarity_function == SimilarityFunction.ENERGY_DISTANCE:
+            return energy_distance
         if similarity_function == SimilarityFunction.COSINE:
             return cos_sim
         if similarity_function == SimilarityFunction.DOT_PRODUCT:
