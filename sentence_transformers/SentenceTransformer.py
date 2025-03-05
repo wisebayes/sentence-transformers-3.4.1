@@ -691,12 +691,12 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
         return input
 
     @property
-    def similarity_fn_name(self) -> Literal["cosine", "dot", "euclidean", "manhattan"]:
+    def similarity_fn_name(self) -> Literal["energy_distance", "cosine", "dot", "euclidean", "manhattan"]:
         """Return the name of the similarity function used by :meth:`SentenceTransformer.similarity` and :meth:`SentenceTransformer.similarity_pairwise`.
 
         Returns:
             Optional[str]: The name of the similarity function. Can be None if not set, in which case it will
-                default to "cosine" when first called.
+                default to "energy_distance" when first called.
 
         Example:
             >>> model = SentenceTransformer("multi-qa-mpnet-base-dot-v1")
@@ -704,12 +704,12 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
             'dot'
         """
         if self._similarity_fn_name is None:
-            self.similarity_fn_name = SimilarityFunction.COSINE
+            self.similarity_fn_name = SimilarityFunction.ENERGY_DISTANCE
         return self._similarity_fn_name
 
     @similarity_fn_name.setter
     def similarity_fn_name(
-        self, value: Literal["cosine", "dot", "euclidean", "manhattan"] | SimilarityFunction
+        self, value: Literal["energy_distance", "cosine", "dot", "euclidean", "manhattan"] | SimilarityFunction
     ) -> None:
         if isinstance(value, SimilarityFunction):
             value = value.value
@@ -717,7 +717,7 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
 
         if value is not None:
             self._similarity = SimilarityFunction.to_similarity_fn(value)
-            self._similarity_pairwise = SimilarityFunction.to_similarity_pairwise_fn(value)
+            #self._similarity_pairwise = SimilarityFunction.to_similarity_pairwise_fn(value)
 
     @overload
     def similarity(self, embeddings1: Tensor, embeddings2: Tensor) -> Tensor: ...
@@ -766,7 +766,7 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
                         [-1.3184, -1.3320, -0.9973, -0.0000]])
         """
         if self.similarity_fn_name is None:
-            self.similarity_fn_name = SimilarityFunction.COSINE
+            self.similarity_fn_name = SimilarityFunction.ENERGY_DISTANCE
         return self._similarity
 
     @overload
