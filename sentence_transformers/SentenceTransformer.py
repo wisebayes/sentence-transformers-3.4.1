@@ -536,10 +536,10 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
         if show_progress_bar is None:
             show_progress_bar = logger.getEffectiveLevel() in (logging.INFO, logging.DEBUG)
 
-        if convert_to_tensor:
+        if convert_to_tensor or output_value == "token_embeddings":
             convert_to_numpy = False
 
-        if output_value != "sentence_embedding":
+        if output_value != "sentence_embedding" and output_value != "token_embeddings":
             convert_to_tensor = False
             convert_to_numpy = False
 
@@ -583,8 +583,12 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
         self.to(device)
 
         all_embeddings = []
+        all_attention_masks = []
         length_sorted_idx = np.argsort([-self._text_length(sen) for sen in sentences])
-        sentences_sorted = [sentences[idx] for idx in length_sorted_idx]
+        if output_value == "token_embeddings":
+            sentences_sorted = sentences #do not sort sentences when generating token embeddings!
+        else:
+            sentences_sorted = [sentences[idx] for idx in length_sorted_idx]
 
         for start_index in trange(0, len(sentences), batch_size, desc="Batches", disable=not show_progress_bar):
             sentences_batch = sentences_sorted[start_index : start_index + batch_size]
@@ -628,14 +632,21 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
                     out_features["sentence_embedding"], self.truncate_dim
                 )
 
-                if output_value == "token_embeddings":
-                    embeddings = []
-                    for token_emb, attention in zip(out_features[output_value], out_features["attention_mask"]):
-                        last_mask_id = len(attention) - 1
-                        while last_mask_id > 0 and attention[last_mask_id].item() == 0:
-                            last_mask_id -= 1
+                if output_value == "token_embeddings": #keep the padded embeddings so that we can store the token_embeddings in a tensor
+                    embeddings = out_features["token_embeddings"]
+                    attention_mask = out_features["attention_mask"]
+                    embeddings = embeddings.detach()
+                    attention_mask = attention_mask.detach()
+                    if normalize_embeddings:
+                        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+                    all_attention_masks.append(attention_mask) #list of 2d tensors
+                    #embeddings = []
+                    #for token_emb, attention in zip(out_features[output_value], out_features["attention_mask"]):
+                    #    last_mask_id = len(attention) - 1
+                    #    while last_mask_id > 0 and attention[last_mask_id].item() == 0:
+                    #        last_mask_id -= 1
 
-                        embeddings.append(token_emb[0 : last_mask_id + 1])
+                    #    embeddings.append(token_emb[0 : last_mask_id + 1])
                 elif output_value is None:  # Return all outputs
                     embeddings = []
                     for sent_idx in range(len(out_features["sentence_embedding"])):
@@ -651,14 +662,18 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
                     if convert_to_numpy:
                         embeddings = embeddings.cpu()
 
-                all_embeddings.extend(embeddings)
+                if output_value == "token_embeddings":
+                    all_embeddings.append(embeddings) #list of 3d tensors, preserve batch embeddigns
+                else: 
+                    all_embeddings.extend(embeddings) #we do not need to preserve the batch embeddings
 
-        all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
+        if output_value != "token_embeddings":
+            all_embeddings = [all_embeddings[idx] for idx in np.argsort(length_sorted_idx)]
 
         if precision and precision != "float32":
             all_embeddings = quantize_embeddings(all_embeddings, precision=precision)
 
-        if convert_to_tensor:
+        if convert_to_tensor and output_value != "token_embeddings": #for token embeddings we want to preserve the list structure for embeddings and attention mask
             if len(all_embeddings):
                 if isinstance(all_embeddings, np.ndarray):
                     all_embeddings = torch.from_numpy(all_embeddings)
@@ -677,6 +692,10 @@ class SentenceTransformer(nn.Sequential, FitMixin, PeftAdapterMixin):
 
         if input_was_string:
             all_embeddings = all_embeddings[0]
+
+         #if we generated token_embeddings then we also need to return the attention mask!
+        if output_value == "token_embeddings":
+            return all_embeddings, all_attention_masks
 
         return all_embeddings
 
