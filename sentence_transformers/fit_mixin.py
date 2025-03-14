@@ -641,6 +641,9 @@ class FitMixin:
 
                     optimizer.zero_grad()
 
+                    # Print the loss value
+                    print(f'Epoch: {epoch+1}, Step: {global_step+1}, Loss: {loss_value.item()}')
+
                     if not skip_scheduler:
                         scheduler.step()
 
