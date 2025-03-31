@@ -324,7 +324,7 @@ class InformationRetrievalEvaluator(SentenceEvaluator):
         actual_total_queries = sum(len(batch) for batch in query_embeddings)
         for name in self.score_functions:
             #queries_result_list[name] = [[] for _ in range(len(query_embeddings))]
-            queries_result_list[name] = [[] for _ in range(len(actual_total_queries))]
+            queries_result_list[name] = [[] for _ in range(actual_total_queries)]
 
         # Precompute all corpus embeddings
         all_corpus_embeddings = self.precompute_corpus_embeddings(
