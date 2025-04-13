@@ -9,6 +9,8 @@ from torch import Tensor, nn
 from sentence_transformers import util
 from sentence_transformers.SentenceTransformer import SentenceTransformer
 
+import copy
+
 def ed_calc(x, attention_mask):
     """
     Calculate the energy for all queries in parallel, accounting for padding.
@@ -34,7 +36,7 @@ def ed_calc(x, attention_mask):
 
     # Apply the attention mask to exclude padded tokens
     attention_mask_expanded = attention_mask.unsqueeze(2) & attention_mask.unsqueeze(1)  # [num_queries, max_sequence_length, max_sequence_length]
-    pairwise_distances = pairwise_distances * attention_mask_expanded  # Mask padded positions
+    pairwise_distances = (pairwise_distances * attention_mask_expanded).clone()  # Mask padded positions
 
     # Count valid token pairs for normalization
     valid_pairs = attention_mask_expanded.sum(dim=(1, 2)).clamp(min=1)  # Shape: [num_queries]
@@ -81,7 +83,7 @@ def energy_distance(x, y, attention_mask):
     # Apply attention mask to zero out padded embeddings
     # Expand attention_mask for broadcasting: [num_queries, max_sequence_length] -> [num_queries, 1, max_sequence_length]
     attention_mask_expanded = attention_mask.unsqueeze(1).expand(-1, num_docs, -1)
-    pairwise_distances = pairwise_distances * attention_mask_expanded
+    pairwise_distances = (pairwise_distances * attention_mask_expanded).clone()
 
     # Compute the sum of sqrt of squared distances for each query-document pair
     #ed_sums = torch.sum(torch.sqrt(squared_distances), dim=2)  # Shape: [num_queries, num_docs]
@@ -185,24 +187,62 @@ class MultipleNegativesRankingLoss(nn.Module):
         self.cross_entropy_loss = nn.CrossEntropyLoss()
 
     def forward(self, sentence_features: Iterable[dict[str, Tensor]], labels: Tensor) -> Tensor:
+        #torch.autograd.set_detect_anomaly(True)  # This will catch NaNs or infinite values during backward
+        #for idx, feature in enumerate(sentence_features):
+        #    input_ids = feature["input_ids"]
+        #    if input_ids.size(1) > self.model.max_seq_length:
+        #        print(f"[ERROR] Input {idx} length={input_ids.size(1)} exceeds max_seq_len={self.model.max_seq_length}")
         # Compute the embeddings and distribute them to anchor and candidates (positive and optionally negatives)
-        embeddings = [self.model(sentence_feature)["sentence_embedding"] for sentence_feature in sentence_features]
+        #embeddings = [self.model(sentence_feature)["sentence_embedding"] for sentence_feature in sentence_features]
         #anchors = embeddings[0]  # (batch_size, embedding_dim)
-        anchors = self.model(sentence_features[0])["token_embeddings"]
+        #anchors = self.model(sentence_features[0])["token_embeddings"]
         #print("Anchor dimensions:", anchors.size())
+        #print("Anchor requires_grad:", anchors.requires_grad)
+        #print("anchors NaNs:", torch.isnan(anchors).any().item())
+        #print("anchors Infs:", torch.isinf(anchors).any().item())
+        #print("sentence_features[0] keys:", sentence_features[0].keys())
+        #print("shape of input_ids:", sentence_features[0]["input_ids"].shape)
+        #print("model output keys:", self.model(sentence_features[0]).keys())
+        #print("input_ids min/max:", sentence_features[0]["input_ids"].min().item(), sentence_features[0]["input_ids"].max().item())
+        #print("input_ids dtype:", sentence_features[0]["input_ids"].dtype)
+        # Run the model only once per input and collect sentence embeddings
+        model_outputs = [self.model(f) for f in sentence_features]
+        embeddings = [output["sentence_embedding"] for output in model_outputs]  # List[Tensor]
+        #for i, feature in enumerate(sentence_features):
+        #    try:
+        #        max_len = feature["input_ids"].size(1)
+        #        max_token = feature["input_ids"].max().item()
+        #        print(f"[DEBUG] Sample {i} - seq len: {max_len}, max token id: {max_token}")
+        #    except Exception as e:
+        #        print(f"[ERROR] Failed on input {i}: {e}")
+
+
+        # Extract token_embeddings and attention_mask from the first output
+        first_output = model_outputs[0]
+        anchors = first_output["token_embeddings"]
+        attention_mask = first_output["attention_mask"]
+
         candidates = torch.cat(embeddings[1:])  # (batch_size * (1 + num_negatives), embedding_dim)
-        #print("Pos and Neg Sentence dimensions:", candidates.size())
-        attention_mask = self.model(sentence_features[0])["attention_mask"] 
-        # For every anchor, we compute the similarity to all other candidates (positives and negatives),
-        # also from other anchors. This gives us a lot of in-batch negatives.
         scores = self.similarity_fct(anchors, candidates, attention_mask) * self.scale * -1
-        # (batch_size, batch_size * (1 + num_negatives))
+        #try:
+            #with torch.autograd.set_detect_anomaly(True):
+        #    scores = self.similarity_fct(anchors, candidates, attention_mask) * self.scale * -1
+        #except Exception as e:
+        #    print("[ERROR in similarity_fct]")
+        #    raise e 
+       # (batch_size, batch_size * (1 + num_negatives))
         #print("Score tensor dimensions:", scores.size())
+        #print("Scores requires_grad:", scores.requires_grad)
         # anchor[i] should be most similar to candidates[i], as that is the paired positive,
         # so the label for anchor[i] is i
         range_labels = torch.arange(0, scores.size(0), device=scores.device)
 
-        return self.cross_entropy_loss(scores, range_labels)
+        loss = self.cross_entropy_loss(scores, range_labels)
+        #print("Loss:", loss.item())
+        #print("Loss requires_grad:", loss.requires_grad)
+        #print("=== [END DEBUG] ===\n")
+        return loss
+
 
     def get_config_dict(self) -> dict[str, Any]:
         return {"scale": self.scale, "similarity_fct": self.similarity_fct.__name__}
